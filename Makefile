@@ -49,7 +49,7 @@ CPP_FLAGS = \
  -Wextra \
  -Werror \
  -pedantic \
- -std=c++14 \
+ -std=c++17 \
  -ggdb3 \
  $(MYSANI)
 
@@ -80,7 +80,10 @@ check: scan-std.cpp
 	cppcheck --enable=all --suppress=missingIncludeSystem $<
 
 iwyu: scan-std.cpp
-	iwyu $<
+	iwyu -resource-dir="/usr/lib/gcc/x86_64-linux-gnu/11" $<
+	
+iwyuc: scan-std.cpp
+	iwyu -resource-dir="/usr/lib/llvm-14/lib/clang/14.0.0" $<
 
 test: scan-std stl.cfg
 	./scan-std -c stl.cfg scan-std.cpp

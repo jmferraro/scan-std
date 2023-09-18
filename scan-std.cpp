@@ -1,24 +1,30 @@
 #include <cstddef>
 #include <fstream>
 #include <iostream>
-#include <map>
 #include <regex>
+#include <map>
 #include <set>
-#include <sstream>
+//#include <sstream>
 #include <string>
 #include <vector>
+#include <tuple>
 
 #include <unistd.h>
 
 // CONFIG OBJECT
 
 /*[[clang::no_destroy]]*/ static uint64_t g_verbose = 0;
+static uint64_t g_debug = 0;
 static std::uint32_t g_dummy = 1024 * 1024;
 static
-  int64_t g_fubar = 2048 * 2048;
+  int64_t g_fubar = 2048 * 2048;        // intentionally split on 2 lines
 
 using ConfigMap = std::map<std::string, std::vector<std::string>>;
-/*[[clang::no_destroy]]*/ static std::map<std::string, std::vector<std::string>> g_config;
+using StringSet = std::set<std::string>;
+using StringVec = std::vector<std::string>;
+
+static ConfigMap g_config;
+static StringSet g_cfgHdrs;
 
 // STRING UTILITIES
 static void trim(std::string& str)
@@ -36,6 +42,20 @@ static void trim(std::string& str)
     }
 }
 
+template<typename T>
+static void dumpList(const std::string& nam, const T& lst)
+{
+    std::cout << nam << ":\n";
+    if (lst.empty()) {
+        std::cout << "- EMPTY\n";
+    }
+    else {
+        for (auto&& itm : lst) {
+            std::cout << "- " << itm << "\n";
+        }
+    }
+}
+
 class Source
 {
 public:
@@ -50,7 +70,6 @@ public:
         }
 
         // set up regex matches
-        static const std::regex reInc(R"(^\s*#include <(\w+(\.h)?)>)");
         static const std::regex reStd(R"(\bstd::\w+\b)");
         // TODO: (std::)u?int\d\d?_t
         //static const std::regex reStd("str");
@@ -60,7 +79,9 @@ public:
         while (getline(ifs, line)) {
             trim(line);
 
-            allMatches(m_incList, line, reInc, 1);
+            hdrMatch(line);
+
+            //allMatches(m_incList, line, reInc, 1);
             allMatches(m_refList, line, reStd, 0);
             //allMatches(g_stdList, line, reInt, 0);
         }
@@ -85,11 +106,20 @@ public:
                 m_unknown.emplace(ref);
             }
             else {
-                if (!contains(m_incList, it->second)) {
-                    m_needed.emplace(it->second.at(0));
+                std::string found;
+                if (contains(m_incList, it->second, found)) {
+                    // headers included that are needed
+                    m_needed.emplace(found);
+                }
+                else {
+                    // headers needed but not found
+                    m_missing.emplace(it->second.at(0));
                 }
             }
         }
+
+        //dumpList("NEEDED", m_needed);
+        //dumpList("HEADERS", m_incList);
 
         // show missing & unknown
         if (!m_unknown.empty()) {
@@ -99,11 +129,35 @@ public:
             }
         }
 
-        if (!m_needed.empty()) {
+        if (!m_missing.empty()) {
             std::cout << "MISSING:\n";
-            for (auto&& nam : m_needed) {
+            for (auto&& nam : m_missing) {
                 std::cout << "- " << nam << "\n";
             }
+        }
+
+        // populate and conditionally print any (probable) extra headers
+        m_extra.clear();
+        for (auto&& hdr : m_incList) {
+            if (!m_needed.count(hdr)) {
+                //std::cout << "... " << hdr << " NOT in needed list, adding to extra...\n";
+                if (g_cfgHdrs.count(hdr)) {     // header is one in the configuration
+                    m_extra.emplace(hdr);
+                }
+                else if (g_debug) {
+                    std::cout << ">>>>>>> Potential extra header: " << hdr << " is NOT in g_cfgHdrs........\n";
+                }
+            }
+        }
+        if (!m_extra.empty()) {
+            std::cout << "EXTRA:\n";
+            for (auto&& nam : m_extra) {
+                std::cout << "- " << nam << "\n";
+            }
+        }
+
+        if (g_debug > 2) {
+            dumpList("cfgHdrs", g_cfgHdrs);
         }
 
         // dummy statements for type scanning...
@@ -116,14 +170,14 @@ public:
 
 
 private:
-    using StringSet = std::set<std::string>;
 
     template<typename T1, typename T2>
-    bool contains(const T1& lst1, const T2& lst2)
+    bool contains(const T1& lst1, const T2& lst2, std::string& match)
     {
         for (auto&& xx : lst1) {
             for (auto&& yy : lst2) {
                 if (xx == yy) {
+                    match = xx;
                     return true;
                 }
             }
@@ -132,12 +186,43 @@ private:
         return false;
     }
 
+    std::size_t hdrMatch(const std::string& line)
+    {
+        static const std::regex reInc(R"(^\s*#include <(\w+(\.h)?)>.*)");
+
+        std::smatch mat;
+        if (std::regex_match(line, mat, reInc)) {
+            // insert header and check for duplicate
+            const auto hdr = mat.str(1);
+            const auto rc = m_incList.emplace(hdr);
+            if (!rc.second) {
+                std::cout << "> Duplicate header found: " << hdr;
+            }
+
+            // consider only "plain" headers when verifying sort order
+            const bool isPlain = std::string::npos == hdr.find_first_of("./\\");
+            if (isPlain) {
+                auto siz = m_vecHdrs.size();
+                if (siz > 1) {
+                    const auto prev = m_vecHdrs.at(siz-1);
+                    if (prev > hdr) {
+                        std::cout << "> Headers not sorted: " << hdr 
+                                  << " (should be before: " << prev << ")\n";
+                    }
+                }
+            }
+            m_vecHdrs.emplace_back(hdr);
+        }
+
+        return m_incList.size();
+    }
+
     std::size_t allMatches(StringSet& matchSet,
                            const std::string& str, 
                            const std::regex& re,
                            std::size_t idx)
     {
-        // finding all the match.
+        // finding all the matches.
         for (auto it = std::sregex_iterator(str.begin(), str.end(), re);
                 it != std::sregex_iterator();
                 it++) {
@@ -161,14 +246,12 @@ private:
 
     StringSet m_incList;
     StringSet m_refList;
+    StringVec m_vecHdrs;
+    StringSet m_extra;
+    StringSet m_missing;
     StringSet m_needed;
     StringSet m_unknown;
-    StringSet m_missing;
-    StringSet m_extra;
 };
-
-
-
 
 static void usage(const std::string& arg0)
 {
@@ -270,6 +353,14 @@ static bool parseConfig(std::string& file)
         if (hdrs.empty()) {
             return false;   // something bad happened
         }
+
+        // store all headers referenced in the config in a set
+        // for later use when parsing the includes in the source
+        for (auto&& hdr : hdrs) {
+            g_cfgHdrs.emplace(hdr);
+        }
+
+        // store the info on the config line
         const auto rc = g_config.emplace(what, hdrs);
         if (!rc.second) {
             std::cerr << "FATAL: Unable to insert config value for: '" << what << "'\n";
@@ -280,25 +371,27 @@ static bool parseConfig(std::string& file)
 
     }
 
-    // dump the config
-    /*
-    std::cout << "SUCCESS!\n";
-    dumpConfig();
-    */
+    if (g_verbose >= 9) {
+        std::cout << "Successfully read configuration:\n";
+        dumpConfig();
+    }
 
     return true;
 }
-
 
 int main(int argc, char **argv)
 {
     int opt;
     std::string cfgFile, errStr;
-    while ((opt = getopt(argc, argv, ":c:vh")) != -1) {
+    while ((opt = getopt(argc, argv, ":c:dvh")) != -1) {
         errStr.clear();
         switch (opt) {
           case 'c':
             cfgFile = optarg;
+            break;
+
+          case 'd':
+            ++g_debug;
             break;
 
           case 'v':
